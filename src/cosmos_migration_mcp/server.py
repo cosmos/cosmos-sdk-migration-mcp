@@ -33,6 +33,7 @@ from .specs import (
     semver_sort_desc,
     scan_chain,
     verify_spec,
+    _detect_sdk_version,
 )
 
 mcp = FastMCP(
@@ -41,6 +42,12 @@ mcp = FastMCP(
     "Provides tools for scanning chains, planning migrations, applying "
     "specs, and verifying results against the repository upgrade docs.",
 )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -61,7 +68,16 @@ def scan_chain_tool(chain_dir: str) -> dict[str, Any]:
     Args:
         chain_dir: Absolute path to the chain repository root.
     """
-    return asdict(_scan_chain_refined(chain_dir, skip_dry_run=True))
+    result = _scan_chain_refined(chain_dir, skip_dry_run=True)
+    data = asdict(result)
+    # Ensure application_order is explicit in the response (issue #15)
+    if "application_order" not in data:
+        data["application_order"] = [
+            sid for sid in result.applicable_specs if sid not in {
+                fb["spec_id"] for fb in result.fatal_blocks
+            }
+        ]
+    return data
 
 
 @mcp.tool()
@@ -80,25 +96,47 @@ def get_migration_plan(chain_dir: str) -> dict[str, Any]:
     Args:
         chain_dir: Absolute path to the chain repository root.
     """
-    specs = load_specs()
-    scan = _scan_chain_refined(chain_dir, specs)
+    try:
+        specs = load_specs()
+        scan = _scan_chain_refined(chain_dir, specs)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": str(exc),
+            "message": "Failed to scan chain directory. Check the path and try again.",
+        }
+
+    result: dict[str, Any] = {
+        "sdk_version": scan.sdk_version,
+    }
+    if scan.detection_note:
+        result["detection_note"] = scan.detection_note
 
     if scan.fatal_blocks:
-        return {
+        result.update({
             "status": "blocked",
-            "sdk_version": scan.sdk_version,
             "fatal_blocks": scan.fatal_blocks,
+            "fatal_spec_ids": scan.fatal_spec_ids,
             "message": "Migration cannot proceed. Resolve fatal blocks first.",
-        }
+        })
+        return result
 
     spec_map = {spec.id: spec for spec in specs}
     plan: list[dict[str, Any]] = []
 
-    for spec_id in scan.applicable_specs:
+    for spec_id in scan.application_order:
         spec = spec_map.get(spec_id)
         if not spec:
             continue
-        preview = _execute_spec(chain_dir, spec, dry_run=True)
+        try:
+            preview = _execute_spec(chain_dir, spec, dry_run=True)
+        except Exception as exc:
+            plan.append({
+                "spec_id": spec.id,
+                "title": spec.title,
+                "error": f"dry-run failed: {exc}",
+            })
+            continue
 
         plan.append(
             {
@@ -113,14 +151,14 @@ def get_migration_plan(chain_dir: str) -> dict[str, Any]:
             }
         )
 
-    return {
+    result.update({
         "status": "ready",
-        "sdk_version": scan.sdk_version,
         "specs_to_apply": len(plan),
         "plan": plan,
         "warnings": scan.warnings,
         "application_order": [entry["spec_id"] for entry in plan],
-    }
+    })
+    return result
 
 
 @mcp.tool()
@@ -172,13 +210,20 @@ def verify_all_specs(chain_dir: str, spec_ids: list[str] | None = None) -> dict[
     """
     Run verification checks for multiple specs against a chain directory.
 
-    If spec_ids is omitted, verification uses the currently detectable specs.
+    If spec_ids is omitted, verification uses the scan's application_order
+    (applicable specs minus fatal blocks) so that fatal-blocked specs are
+    not verified by default.
+
     For post-migration verification, prefer passing the application_order from
-    get_migration_plan so removed specs are still checked.
+    get_migration_plan or scan_chain_tool so removed specs are still checked.
     """
     specs = load_specs()
     spec_map = {spec.id: spec for spec in specs}
-    selected_ids = spec_ids or _scan_chain_refined(chain_dir, specs).applicable_specs
+    if spec_ids is None:
+        scan = _scan_chain_refined(chain_dir, specs, skip_dry_run=True)
+        selected_ids = scan.application_order
+    else:
+        selected_ids = spec_ids
 
     results = []
     all_passed = True
@@ -210,16 +255,54 @@ def verify_all_specs(chain_dir: str, spec_ids: list[str] | None = None) -> dict[
 
 
 @mcp.tool()
-def verify_build(chain_dir: str, timeout: int = 300) -> dict[str, Any]:
+def verify_build(chain_dir: str, timeout: int = 300, all_modules: bool = False) -> dict[str, Any]:
     """
     Run `go build ./...` in the chain directory and return structured results.
+
+    When all_modules is True, discovers all go.mod files under the chain
+    directory and builds each module separately.
+
+    Args:
+        chain_dir: Absolute path to the chain repository root.
+        timeout: Maximum seconds to wait per module (default 300).
+        all_modules: If True, build all sub-modules too (default False).
     """
+    if all_modules:
+        go_mod_paths = list_go_mod_files(chain_dir)
+        module_dirs = sorted(
+            {os.path.dirname(p) for p in go_mod_paths},
+            key=lambda d: (d != chain_dir, d),
+        ) if go_mod_paths else [chain_dir]
+    else:
+        module_dirs = [chain_dir]
+
+    if len(module_dirs) == 1:
+        return _build_single_module(module_dirs[0], chain_dir, timeout)
+
+    module_results: list[dict[str, Any]] = []
+    all_passed = True
+    for module_dir in module_dirs:
+        result = _build_single_module(module_dir, chain_dir, timeout)
+        relpath = os.path.relpath(module_dir, chain_dir) if module_dir != chain_dir else "."
+        result["module"] = relpath
+        module_results.append(result)
+        if not result["passed"]:
+            all_passed = False
+
+    return {
+        "passed": all_passed,
+        "modules_built": len(module_results),
+        "results": module_results,
+    }
+
+
+def _build_single_module(module_dir: str, chain_dir: str, timeout: int) -> dict[str, Any]:
     try:
         result = subprocess.run(
             ["go", "build", "./..."],
             capture_output=True,
             text=True,
-            cwd=chain_dir,
+            cwd=module_dir,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -240,36 +323,70 @@ def verify_build(chain_dir: str, timeout: int = 300) -> dict[str, Any]:
 
 
 @mcp.tool()
-def run_go_mod_tidy(chain_dir: str, timeout: int = 120) -> dict[str, Any]:
+def run_go_mod_tidy(chain_dir: str, timeout: int = 120, all_modules: bool = True) -> dict[str, Any]:
     """
     Run `go mod tidy` in the chain directory and return structured results.
 
     This should be called after all specs have been applied to clean up
     go.mod and go.sum dependencies.
 
+    When all_modules is True (default), discovers all go.mod files under the
+    chain directory and runs go mod tidy in each module directory.
+
     Args:
         chain_dir: Absolute path to the chain repository root.
-        timeout: Maximum seconds to wait (default 120).
+        timeout: Maximum seconds to wait per module (default 120).
+        all_modules: If True, tidy all sub-modules too (default True).
     """
-    try:
-        result = subprocess.run(
-            ["go", "mod", "tidy"],
-            capture_output=True,
-            text=True,
-            cwd=chain_dir,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return {"passed": False, "error": f"go mod tidy timed out after {timeout}s"}
-    except FileNotFoundError:
-        return {"passed": False, "error": "go binary not found in PATH"}
+    go_mod_paths = list_go_mod_files(chain_dir) if all_modules else [os.path.join(chain_dir, "go.mod")]
+    if not go_mod_paths:
+        go_mod_paths = [os.path.join(chain_dir, "go.mod")]
 
-    if result.returncode == 0:
-        return {"passed": True, "output": result.stdout[:2000]}
+    # Deduplicate and sort: root first, then sub-modules
+    module_dirs = sorted(
+        {os.path.dirname(p) for p in go_mod_paths},
+        key=lambda d: (d != chain_dir, d),
+    )
+
+    module_results: list[dict[str, Any]] = []
+    all_passed = True
+
+    for module_dir in module_dirs:
+        relpath = os.path.relpath(module_dir, chain_dir) if module_dir != chain_dir else "."
+        try:
+            result = subprocess.run(
+                ["go", "mod", "tidy"],
+                capture_output=True,
+                text=True,
+                cwd=module_dir,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            module_results.append({"module": relpath, "passed": False, "error": f"timed out after {timeout}s"})
+            all_passed = False
+            continue
+        except FileNotFoundError:
+            return {"passed": False, "error": "go binary not found in PATH"}
+
+        if result.returncode == 0:
+            module_results.append({"module": relpath, "passed": True})
+        else:
+            module_results.append({
+                "module": relpath,
+                "passed": False,
+                "error": result.stderr[:2000],
+            })
+            all_passed = False
+
+    if len(module_results) == 1:
+        # Single-module: keep backward-compatible response shape
+        entry = module_results[0]
+        return {"passed": entry["passed"], **({} if entry["passed"] else {"error": entry.get("error", "")})}
+
     return {
-        "passed": False,
-        "error": result.stderr[:3000],
-        "output": result.stdout[:2000],
+        "passed": all_passed,
+        "modules_tidied": len(module_results),
+        "results": module_results,
     }
 
 
@@ -412,10 +529,13 @@ def _scan_chain_refined(
             warnings=_dedupe_warning_entries(raw_scan.warnings),
             fatal_blocks=raw_scan.fatal_blocks,
             detection_details=raw_scan.detection_details,
+            detection_note=raw_scan.detection_note,
+            fatal_spec_ids=raw_scan.fatal_spec_ids,
+            application_order=raw_scan.application_order,
         )
 
     spec_map = {spec.id: spec for spec in specs}
-    fatal_ids = {entry["spec_id"] for entry in raw_scan.fatal_blocks}
+    fatal_ids = set(raw_scan.fatal_spec_ids)
 
     applicable_specs: list[str] = []
     detection_details: dict[str, dict[str, list[str]]] = {}
@@ -437,6 +557,8 @@ def _scan_chain_refined(
             if spec_id in raw_scan.detection_details:
                 detection_details[spec_id] = raw_scan.detection_details[spec_id]
 
+    application_order = [sid for sid in applicable_specs if sid not in fatal_ids]
+
     return ScanResult(
         chain_dir=raw_scan.chain_dir,
         sdk_version=raw_scan.sdk_version,
@@ -444,6 +566,9 @@ def _scan_chain_refined(
         warnings=_dedupe_warning_entries(raw_scan.warnings),
         fatal_blocks=raw_scan.fatal_blocks,
         detection_details=detection_details,
+        detection_note=raw_scan.detection_note,
+        fatal_spec_ids=list(fatal_ids),
+        application_order=application_order,
     )
 
 
@@ -644,22 +769,25 @@ def _execute_spec(chain_dir: str, spec: Spec, dry_run: bool) -> dict[str, Any]:
         "call_arg_edits": [],
         "special_case_rewrites": [],
         "text_replacements": [],
+        "import_additions": [],
         "manual_steps_required": list(spec.manual_steps),
         "warnings": [],
     }
 
     changes = spec.changes
+    import_changes = _mapping(changes.get("imports"))
 
     _apply_file_removals(chain_dir, changes.get("file_removals", []), dry_run, results)
     _apply_go_mod_changes(chain_dir, changes.get("go_mod", {}), dry_run, results)
-    _apply_import_rewrites(chain_dir, changes.get("imports", {}).get("rewrites", []), dry_run, results)
+    _apply_import_rewrites(chain_dir, import_changes.get("rewrites", []), dry_run, results)
     _apply_statement_removals(chain_dir, changes.get("statement_removals", []), dry_run, results)
     _apply_map_entry_removals(chain_dir, changes.get("map_entry_removals", []), dry_run, results)
     _apply_call_arg_edits(chain_dir, changes.get("call_arg_edits", []), dry_run, results)
     _apply_special_cases(chain_dir, changes.get("special_cases", []), dry_run, results)
     _apply_text_replacements(chain_dir, changes.get("text_replacements", []), dry_run, results)
+    _apply_required_imports(chain_dir, changes.get("required_imports", []), dry_run, results)
 
-    for warning in changes.get("imports", {}).get("warnings", []):
+    for warning in import_changes.get("warnings", []):
         if not warning.get("fatal", False):
             results["warnings"].append(warning.get("message", ""))
 
@@ -681,6 +809,16 @@ def _finalize_spec_results(chain_dir: str, spec: Spec, results: dict[str, Any]) 
     if spec.raw.get("manual_steps_policy") == "only_when_unresolved" and verification.passed:
         results["manual_steps_required"] = []
 
+    # Post-apply syntax validation on changed files (issue #9)
+    if not results.get("dry_run", False):
+        syntax_errors = _validate_changed_files_syntax(chain_dir, results)
+        if syntax_errors:
+            results["syntax_errors"] = syntax_errors
+            results["warnings"].append(
+                f"Post-apply syntax check found {len(syntax_errors)} error(s). "
+                "Run `gofmt -e` on the affected files."
+            )
+
     return results
 
 
@@ -694,8 +832,43 @@ def _results_have_effective_changes(results: dict[str, Any]) -> bool:
         "call_arg_edits",
         "special_case_rewrites",
         "text_replacements",
+        "import_additions",
     )
     return any(results.get(key) for key in change_keys)
+
+
+def _validate_changed_files_syntax(chain_dir: str, results: dict[str, Any]) -> list[dict[str, str]]:
+    """Run gofmt -e on files changed by spec application to catch syntax errors."""
+    changed_files: set[str] = set()
+    for key in ("import_rewrites", "statement_removals", "map_entry_removals",
+                "call_arg_edits", "special_case_rewrites", "text_replacements",
+                "import_additions"):
+        for entry in results.get(key, []):
+            f = entry.get("file", "")
+            if f and f.endswith(".go"):
+                changed_files.add(os.path.join(chain_dir, f))
+
+    errors: list[dict[str, str]] = []
+    for path in sorted(changed_files):
+        if not os.path.isfile(path):
+            continue
+        try:
+            result = subprocess.run(
+                ["gofmt", "-e", path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            break  # gofmt not available or timed out, skip validation
+        if result.returncode != 0:
+            relpath = os.path.relpath(path, chain_dir)
+            errors.append({
+                "file": relpath,
+                "errors": result.stderr[:1000],
+            })
+
+    return errors
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:
@@ -1019,6 +1192,76 @@ def _apply_text_replacements(
                 _safe_write_file(path, updated)
 
 
+def _apply_required_imports(
+    chain_dir: str,
+    required_imports: list[dict[str, Any]],
+    dry_run: bool,
+    results: dict[str, Any],
+) -> None:
+    """Inject missing imports into Go files that reference symbols from a package.
+
+    Each entry in *required_imports* should have:
+      - ``import_path``: the Go import path (e.g. ``cosmossdk.io/x/bank/types``)
+      - ``alias`` (optional): desired import alias (e.g. ``banktypes``)
+      - ``symbol``: a symbol whose presence triggers the import injection
+    """
+    if not required_imports:
+        return
+
+    for entry in required_imports:
+        import_path = entry.get("import_path", "")
+        alias = entry.get("alias", "")
+        symbol = entry.get("symbol", "")
+        if not import_path or not symbol:
+            continue
+
+        for path in list_go_files(chain_dir):
+            content = _read_file(path)
+            if symbol not in content:
+                continue
+            # Already imported?
+            if import_path in content:
+                continue
+
+            updated = _inject_go_import(content, import_path, alias)
+            if updated == content:
+                continue
+
+            relpath = os.path.relpath(path, chain_dir)
+            results["import_additions"].append({
+                "file": relpath,
+                "action": "would_add_import" if dry_run else "added_import",
+                "import": f"{alias} {import_path}" if alias else import_path,
+            })
+            if not dry_run:
+                _safe_write_file(path, updated)
+
+
+def _inject_go_import(content: str, import_path: str, alias: str = "") -> str:
+    """Add an import to a Go file's import block."""
+    import_line = f'\t{alias} "{import_path}"' if alias else f'\t"{import_path}"'
+
+    # Try to add inside existing import (...) block
+    match = re.search(r'(import\s*\()', content)
+    if match:
+        insert_pos = match.end()
+        return content[:insert_pos] + "\n" + import_line + content[insert_pos:]
+
+    # Try to add after a single-line import
+    match = re.search(r'^(import\s+"[^"]+"\s*)$', content, re.MULTILINE)
+    if match:
+        insert_pos = match.end()
+        return content[:insert_pos] + "\n" + f'import (\n{import_line}\n)' + content[insert_pos:]
+
+    # No import block found — add after package declaration
+    match = re.search(r'^(package\s+\w+\s*)$', content, re.MULTILINE)
+    if match:
+        insert_pos = match.end()
+        return content[:insert_pos] + f'\n\nimport (\n{import_line}\n)\n' + content[insert_pos:]
+
+    return content
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STRUCTURAL REWRITE HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1109,11 +1352,32 @@ def _apply_call_arg_edit(content: str, edit: dict[str, Any]) -> tuple[str, int]:
             if any(_normalize_arg(arg) == _normalize_arg(expr) for arg in new_args):
                 continue
             position = max(0, min(addition.get("position", len(new_args)), len(new_args)))
+
+            # Handle variadic prepend: if inserting at position 0 and
+            # there's a variadic arg (ends with ...), we need to use
+            # append([]T{expr}, slice...)... instead of just inserting.
+            if position == 0 and new_args:
+                variadic_idx = _find_variadic_arg(new_args)
+                if variadic_idx is not None:
+                    # Convert: f(slice...) -> f(append([]string{expr}, slice...)...)
+                    variadic_arg = new_args[variadic_idx].strip().rstrip(",")
+                    new_args[variadic_idx] = f"append([]string{{{expr}}}, {variadic_arg})..."
+                    continue
+
             new_args.insert(position, expr)
 
         return new_args if _normalize_args_list(original) != _normalize_args_list(new_args) else None
 
     return _rewrite_call_args_by_token(content, token, transform)
+
+
+def _find_variadic_arg(args: list[str]) -> int | None:
+    """Find the index of a variadic expansion arg (ending with ...)."""
+    for i, arg in enumerate(args):
+        normalized = arg.strip().rstrip(",")
+        if normalized.endswith("..."):
+            return i
+    return None
 
 
 def _rewrite_call_args_by_token(
@@ -1168,13 +1432,45 @@ def _rewrite_gov_new_keeper_calls(content: str) -> tuple[str, int]:
         token = f"{alias}.NewKeeper("
 
         def transform(args: list[str], *, keeper_alias: str = alias) -> list[str] | None:
+            # Already migrated
             if any("NewDefaultCalculateVoteResultsAndVotingPower" in arg for arg in args):
                 return None
-            if len(args) < 9:
+            if len(args) < 8:
                 return None
 
-            staking_keeper = args[4].strip().rstrip(",")
-            new_args = list(args[:4]) + list(args[5:9])
+            # Find the staking keeper argument by name heuristic.
+            # The v53 signature is:
+            #   (cdc, storeService, acctKeeper, bankKeeper, stakingKeeper,
+            #    distrKeeper, router, config, authority, ...initOptions)
+            # We identify stakingKeeper by looking for "Staking" or "staking"
+            # in args 3-6 (0-indexed), falling back to position 4.
+            staking_idx = None
+            for i in range(3, min(len(args), 7)):
+                normalized = _normalize_arg(args[i])
+                if "staking" in normalized.lower() or "Staking" in args[i]:
+                    staking_idx = i
+                    break
+
+            if staking_idx is None:
+                # Fallback: assume position 4 (classic layout)
+                staking_idx = 4
+                if staking_idx >= len(args):
+                    return None
+
+            staking_keeper = args[staking_idx].strip().rstrip(",")
+
+            # Build new args: everything before staking, skip staking,
+            # take the next 4 args (distrKeeper, router, config, authority),
+            # drop any remaining variadic initOptions, append the wrapper.
+            before_staking = list(args[:staking_idx])
+            after_staking = list(args[staking_idx + 1:])
+
+            # Take up to 4 positional args after staking (distr, router, config, authority)
+            positional_count = min(4, len(after_staking))
+            positional_args = after_staking[:positional_count]
+            # Drop remaining variadic initOptions
+
+            new_args = before_staking + positional_args
             new_args.append(
                 f"{keeper_alias}.NewDefaultCalculateVoteResultsAndVotingPower({staking_keeper})"
             )
@@ -1715,6 +2011,7 @@ def _matches_file(relpath: str, file_match: str) -> bool:
 def _estimate_affected_files(chain_dir: str, spec: Spec) -> list[str]:
     affected: set[str] = set()
     changes = spec.changes
+    import_changes = _mapping(changes.get("imports"))
 
     # Collect go_mod files if needed
     if changes.get("go_mod"):
@@ -1734,7 +2031,7 @@ def _estimate_affected_files(chain_dir: str, spec: Spec) -> list[str]:
         if old:
             search_patterns.append((old, replacement.get("file_match", "")))
 
-    for rewrite in changes.get("imports", {}).get("rewrites", []):
+    for rewrite in import_changes.get("rewrites", []):
         old = rewrite.get("old", "")
         if old:
             search_patterns.append((old, ""))
@@ -1781,10 +2078,11 @@ def _estimate_affected_files(chain_dir: str, spec: Spec) -> list[str]:
 
 
 def _summarize_changes(changes: dict[str, Any]) -> dict[str, int]:
+    import_changes = _mapping(changes.get("imports"))
     return {
         "go_mod": 1 if changes.get("go_mod") else 0,
-        "import_rewrites": len(changes.get("imports", {}).get("rewrites", [])),
-        "import_warnings": len(changes.get("imports", {}).get("warnings", [])),
+        "import_rewrites": len(import_changes.get("rewrites", [])),
+        "import_warnings": len(import_changes.get("warnings", [])),
         "file_removals": len(changes.get("file_removals", [])),
         "statement_removals": len(changes.get("statement_removals", [])),
         "map_entry_removals": len(changes.get("map_entry_removals", [])),

@@ -59,16 +59,23 @@ class Spec:
 
     @property
     def has_fatal_warnings(self) -> bool:
-        warnings = self.changes.get("imports", {}).get("warnings", [])
+        warnings = _mapping(self.changes.get("imports")).get("warnings", [])
         return any(w.get("fatal", False) for w in warnings)
 
     @property
     def fatal_message(self) -> str:
-        warnings = self.changes.get("imports", {}).get("warnings", [])
+        warnings = _mapping(self.changes.get("imports")).get("warnings", [])
         for warning in warnings:
             if warning.get("fatal", False):
                 return warning.get("message", "")
         return ""
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    """Normalize optional YAML mapping sections to empty dicts."""
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 def _normalize_manual_steps(raw_steps: Any) -> list[dict[str, str]]:
@@ -108,9 +115,10 @@ def _load_specs_cached(directory: str) -> tuple[Spec, ...]:
     specs = []
     for spec_file in sorted(Path(directory).glob("*.yaml")):
         with spec_file.open() as handle:
-            raw = yaml.safe_load(handle)
+            raw = _mapping(yaml.safe_load(handle))
 
-        detection = raw.get("detection", {})
+        detection = _mapping(raw.get("detection"))
+        sdk_version = _mapping(detection.get("sdk_version"))
         specs.append(
             Spec(
                 id=raw["id"],
@@ -122,11 +130,11 @@ def _load_specs_cached(directory: str) -> tuple[Spec, ...]:
                 detection_patterns=detection.get("patterns", []),
                 detection_files=detection.get("files", []),
                 detection_go_mod=detection.get("go_mod", []),
-                detection_min_sdk_version=str(detection.get("sdk_version", {}).get("min_inclusive", "")),
-                detection_max_sdk_version_exclusive=str(detection.get("sdk_version", {}).get("max_exclusive", "")),
-                changes=raw.get("changes", {}),
+                detection_min_sdk_version=str(sdk_version.get("min_inclusive", "")),
+                detection_max_sdk_version_exclusive=str(sdk_version.get("max_exclusive", "")),
+                changes=_mapping(raw.get("changes")),
                 manual_steps=_normalize_manual_steps(raw.get("manual_steps", [])),
-                verification=raw.get("verification", {}),
+                verification=_mapping(raw.get("verification")),
             )
         )
     return tuple(specs)
@@ -243,21 +251,53 @@ def _find_named_files(directory: str, names: list[str], max_results: int = 50) -
     return matches
 
 
-def _detect_sdk_version(chain_dir: str) -> str:
-    """Parse go.mod to find the SDK version."""
+@dataclass
+class SDKVersionResult:
+    """Result of SDK version detection."""
+
+    version: str
+    detection_note: str = ""
+
+
+def _detect_sdk_version(chain_dir: str) -> SDKVersionResult:
+    """Parse go.mod to find the SDK version.
+
+    Returns a structured result with the version string and an optional
+    diagnostic note explaining *why* detection failed or was ambiguous.
+    """
     go_mod_files = list_go_mod_files(chain_dir)
     if not go_mod_files:
-        return "unknown"
+        return SDKVersionResult("unknown", "no go.mod files found in the directory tree")
 
-    content = _read_file(go_mod_files[0])
-    for line in content.splitlines():
-        stripped = line.strip()
-        if "github.com/cosmos/cosmos-sdk" not in stripped or stripped.startswith("//"):
-            continue
-        for part in stripped.split():
-            if part.startswith("v0."):
-                return part
-    return "unknown"
+    # Check root go.mod first, then sub-modules
+    root_go_mod = os.path.join(chain_dir, "go.mod")
+    ordered = sorted(go_mod_files, key=lambda p: (p != root_go_mod, p))
+
+    for go_mod_path in ordered:
+        content = _read_file(go_mod_path)
+
+        # Detect if this IS the SDK itself
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("module ") and "github.com/cosmos/cosmos-sdk" in stripped:
+                return SDKVersionResult(
+                    "unknown",
+                    f"module path is github.com/cosmos/cosmos-sdk in {os.path.relpath(go_mod_path, chain_dir)}; "
+                    "this appears to be the SDK itself rather than a dependent chain",
+                )
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if "github.com/cosmos/cosmos-sdk" not in stripped or stripped.startswith("//"):
+                continue
+            for part in stripped.split():
+                if part.startswith("v0."):
+                    return SDKVersionResult(part)
+
+    return SDKVersionResult(
+        "unknown",
+        "github.com/cosmos/cosmos-sdk dependency not found in any go.mod file",
+    )
 
 
 def _parse_semver(version: str) -> tuple[tuple[int, int, int], list[str | int] | None] | None:
@@ -368,6 +408,9 @@ class ScanResult:
     warnings: list[dict[str, str]]
     fatal_blocks: list[dict[str, str]]
     detection_details: dict[str, dict[str, list[str]]]
+    detection_note: str = ""
+    fatal_spec_ids: list[str] = field(default_factory=list)
+    application_order: list[str] = field(default_factory=list)
 
 
 def scan_chain(chain_dir: str, specs: list[Spec] | None = None) -> ScanResult:
@@ -375,14 +418,19 @@ def scan_chain(chain_dir: str, specs: list[Spec] | None = None) -> ScanResult:
     Scan a chain directory and determine which specs apply.
 
     Returns a structured result with SDK version, applicable specs,
-    warnings, and fatal blocks.
+    warnings, and fatal blocks.  Fatal-blocked specs appear in both
+    ``applicable_specs`` (for backward compat) and ``fatal_spec_ids``.
+    The ``application_order`` field contains non-fatal applicable specs
+    in the correct sequence.
     """
     specs = specs or load_specs()
 
-    sdk_version = _detect_sdk_version(chain_dir)
+    version_result = _detect_sdk_version(chain_dir)
+    sdk_version = version_result.version
     applicable: list[str] = []
     warnings: list[dict[str, str]] = []
     fatal_blocks: list[dict[str, str]] = []
+    fatal_spec_ids: list[str] = []
     details: dict[str, dict[str, list[str]]] = {}
 
     go_files = list_go_files(chain_dir)
@@ -428,14 +476,17 @@ def scan_chain(chain_dir: str, specs: list[Spec] | None = None) -> ScanResult:
                 fatal_blocks.append(
                     {"spec_id": spec.id, "message": spec.fatal_message}
                 )
+                fatal_spec_ids.append(spec.id)
 
-            for warning in spec.changes.get("imports", {}).get("warnings", []):
+            for warning in _mapping(spec.changes.get("imports")).get("warnings", []):
                 if not warning.get("fatal", False):
                     key = (spec.id, warning.get("message", ""))
                     if key in warning_keys:
                         continue
                     warning_keys.add(key)
                     warnings.append({"spec_id": spec.id, "message": key[1]})
+
+    application_order = [sid for sid in applicable if sid not in fatal_spec_ids]
 
     return ScanResult(
         chain_dir=chain_dir,
@@ -444,6 +495,9 @@ def scan_chain(chain_dir: str, specs: list[Spec] | None = None) -> ScanResult:
         warnings=warnings,
         fatal_blocks=fatal_blocks,
         detection_details=details,
+        detection_note=version_result.detection_note,
+        fatal_spec_ids=fatal_spec_ids,
+        application_order=application_order,
     )
 
 
@@ -507,11 +561,11 @@ def _check_content_rules(
     failures: list[str] = []
 
     for entry in entries:
-        pattern, file_match = _parse_content_rule(entry)
+        pattern, file_match, exclude_file_match = _parse_content_rule(entry)
         if not pattern:
             continue
 
-        files = _matching_content_files(go_files, chain_dir, pattern, file_match)
+        files = _matching_content_files(go_files, chain_dir, pattern, file_match, exclude_file_match)
         if should_exist:
             if not files:
                 failures.append(f"must_contain '{pattern}' not found anywhere")
@@ -526,12 +580,17 @@ def _check_content_rules(
     return failures
 
 
-def _parse_content_rule(entry: Any) -> tuple[str, str]:
+def _parse_content_rule(entry: Any) -> tuple[str, str, str]:
+    """Return (pattern, file_match, exclude_file_match)."""
     if isinstance(entry, str):
-        return entry, ""
+        return entry, "", ""
     if isinstance(entry, dict):
-        return entry.get("pattern", ""), entry.get("file_match", "")
-    return "", ""
+        return (
+            entry.get("pattern", ""),
+            entry.get("file_match", ""),
+            entry.get("exclude_file_match", ""),
+        )
+    return "", "", ""
 
 
 def _matching_content_files(
@@ -539,11 +598,17 @@ def _matching_content_files(
     chain_dir: str,
     pattern: str,
     file_match: str,
+    exclude_file_match: str = "",
 ) -> list[str]:
     files = _search_files(go_files, pattern, literal=True)
-    if not file_match:
-        return files
-    return [
-        path for path in files
-        if os.path.relpath(path, chain_dir).endswith(file_match)
-    ]
+    if file_match:
+        files = [
+            path for path in files
+            if os.path.relpath(path, chain_dir).endswith(file_match)
+        ]
+    if exclude_file_match:
+        files = [
+            path for path in files
+            if not os.path.relpath(path, chain_dir).endswith(exclude_file_match)
+        ]
+    return files

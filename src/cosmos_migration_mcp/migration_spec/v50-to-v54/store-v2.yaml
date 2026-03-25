@@ -67,6 +67,8 @@ verification:
   must_not_import:
     - cosmossdk.io/store
   must_not_contain:
+    # Exclude baseapp/test_helpers.go which *defines* the deprecated function
     - pattern: NewUncachedContext(
+      exclude_file_match: baseapp/test_helpers.go
     - pattern: SimWriteState(
     - pattern: SetStoreMetrics(

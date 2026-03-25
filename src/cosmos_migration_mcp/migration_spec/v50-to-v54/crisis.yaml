@@ -118,6 +118,13 @@ changes:
       remove:
         - crisistypes.ModuleName
 
+  # ── required imports ────────────────────────────────────────────────────
+  # Ensure banktypes import exists when adding banktypes.ModuleName.
+  required_imports:
+    - import_path: github.com/cosmos/cosmos-sdk/x/bank/types
+      alias: banktypes
+      symbol: banktypes.ModuleName
+
   # ── text replacements ────────────────────────────────────────────────────
   # Handle patterns too nested for AST: flag wiring, subspace registration,
   # inline module name references, and switch/case cleanup.
@@ -193,4 +200,10 @@ verification:
     - pattern: app.CrisisKeeper
     - pattern: crisistypes.StoreKey
     - pattern: crisis.AddModuleInitFlags
+    # Scoped to app files — the SDK framework stubs in types/module/ and
+    # testutil/mock/ define RegisterInvariants as part of the module
+    # interface, which is not a crisis usage.
     - pattern: RegisterInvariants
+      file_match: app.go
+    - pattern: RegisterInvariants
+      file_match: app/app.go
