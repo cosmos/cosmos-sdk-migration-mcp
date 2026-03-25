@@ -1,0 +1,209 @@
+id: crisis-removal
+title: Remove x/crisis module
+version: v50+ -> v54
+description: |
+  Cosmos SDK v0.54 moves x/crisis to contrib and no longer wires it into the
+  reference application. This migration framework intentionally removes crisis
+  by default instead of carrying it forward under contrib, because most chains
+  should drop the module rather than preserve the older invariant message path.
+
+  Chains that intentionally want to keep crisis should stop after planning and
+  migrate to contrib/x/crisis manually instead of applying this spec.
+
+  This spec handles the full automated removal: keeper, store key, module
+  registration, ordering entries, flag wiring, and related map/type cleanup.
+
+upstream_sources:
+  - docs://upgrading/v0.54
+  - docs://changelog/v0.54-breaking
+
+detection:
+  # The spec applies if any of these import prefixes are found in the repo.
+  imports:
+    - github.com/cosmos/cosmos-sdk/x/crisis
+    - cosmossdk.io/x/crisis
+    - github.com/cosmos/cosmos-sdk/contrib/x/crisis
+  # Additional code patterns that indicate usage (belt-and-suspenders).
+  patterns:
+    - app.CrisisKeeper
+    - crisistypes.StoreKey
+
+changes:
+  # ── go.mod ──────────────────────────────────────────────────────────────
+  # No go.mod changes needed; crisis is still part of the main cosmos-sdk
+  # module and does not have its own go.mod entry.
+
+  # ── imports ─────────────────────────────────────────────────────────────
+  imports:
+    warnings:
+      - prefix: github.com/cosmos/cosmos-sdk/x/crisis
+        message: >
+          this framework removes crisis by default. If you intend to keep it,
+          stop and migrate to contrib/x/crisis manually instead.
+        fatal: false
+      - prefix: cosmossdk.io/x/crisis
+        message: >
+          this framework removes crisis by default. If you intend to keep it,
+          stop and migrate to contrib/x/crisis manually instead.
+        fatal: false
+      - prefix: github.com/cosmos/cosmos-sdk/contrib/x/crisis
+        message: >
+          this framework removes crisis by default. If you intend to keep it,
+          do not apply the crisis-removal spec.
+        fatal: false
+
+  # ── statement removals ──────────────────────────────────────────────────
+  # Remove keeper initialisation and adjacent wiring statements.
+  statement_removals:
+    - assign_target: app.CrisisKeeper
+    - call_pattern: crisis.AddModuleInitFlags
+    - call_pattern: app.ModuleManager.RegisterInvariants
+
+  # ── map entry removals ──────────────────────────────────────────────────
+  # Remove crisis message types from internal message maps.
+  map_entry_removals:
+    - map_var: InternalMsgSamplesDefault
+      keys:
+        - '"/cosmos.crisis.v1beta1.MsgUpdateParams"'
+        - '"/cosmos.crisis.v1beta1.MsgUpdateParamsResponse"'
+        # MsgSetProposers was also removed in v54 (staking, not crisis, but
+        # grouped here because the map entry removal happens in the same pass).
+        - '"/cosmos.staking.v1beta1.MsgSetProposers"'
+        - '"/cosmos.staking.v1beta1.MsgSetProposersResponse"'
+    - map_var: UnsupportedMsgSamples
+      keys:
+        - '"/cosmos.crisis.v1beta1.MsgVerifyInvariant"'
+        - '"/cosmos.crisis.v1beta1.MsgVerifyInvariantResponse"'
+    - map_var: AllTypeMessages
+      keys:
+        - '"/cosmos.crisis.v1beta1.MsgUpdateParams"'
+        - '"/cosmos.crisis.v1beta1.MsgUpdateParamsResponse"'
+        - '"/cosmos.crisis.v1beta1.MsgVerifyInvariant"'
+        - '"/cosmos.crisis.v1beta1.MsgVerifyInvariantResponse"'
+
+  # ── call arg edits ───────────────────────────────────────────────────────
+  # Remove crisis entries from store key wiring and module ordering calls.
+  call_arg_edits:
+    - func_pattern: storetypes.NewKVStoreKeys
+      remove:
+        - crisistypes.StoreKey
+
+    - func_pattern: module.NewManager
+      remove:
+        - crisis.NewAppModule(...)
+
+    - func_pattern: module.NewBasicManager
+      remove:
+        - crisis.AppModuleBasic{...}
+
+    - func_pattern: ante.MakeTestEncodingConfig
+      remove:
+        - crisis.AppModuleBasic{...}
+
+    - method_name: SetOrderBeginBlockers
+      remove:
+        - crisistypes.ModuleName
+
+    - method_name: SetOrderEndBlockers
+      remove:
+        - crisistypes.ModuleName
+      add:
+        - position: 0
+          expr: banktypes.ModuleName
+
+    - method_name: SetOrderInitGenesis
+      remove:
+        - crisistypes.ModuleName
+
+    - method_name: SetOrderMigrations
+      remove:
+        - crisistypes.ModuleName
+
+  # ── text replacements ────────────────────────────────────────────────────
+  # Handle patterns too nested for AST: flag wiring, subspace registration,
+  # inline module name references, and switch/case cleanup.
+  text_replacements:
+    # app.go: remove flag wiring and params subspace
+    - old: "\tvar skipGenesisInvariants = cast.ToBool(appOpts.Get(crisis.FlagSkipGenesisInvariants))\n"
+      new: ""
+      file_match: app.go
+
+    - old: "\tparamsKeeper.Subspace(crisistypes.ModuleName)\n"
+      new: ""
+      file_match: app.go
+
+    # lib/ante/internal_msg.go: remove crisis MsgUpdateParams from switch/array
+    - old: "\n\t\t// crisis\n\t\t*crisis.MsgUpdateParams,\n"
+      new: "\n"
+      file_match: lib/ante/internal_msg.go
+
+    - old: "\n\t\t*crisis.MsgUpdateParams,\n"
+      new: "\n"
+      file_match: lib/ante/internal_msg.go
+
+    - old: "\n\t\t*crisis.MsgUpdateParams:\n"
+      new: "\n"
+      file_match: lib/ante/internal_msg.go
+
+    - old: "\t\t*staking.MsgSetProposers,\n"
+      new: ""
+      file_match: lib/ante/internal_msg.go
+
+    # lib/ante/unsupported_msgs.go: remove MsgVerifyInvariant case
+    - old: "\t\t*crisis.MsgVerifyInvariant:\n"
+      new: ""
+      file_match: lib/ante/unsupported_msgs.go
+
+    # Repair the preceding case after removing MsgVerifyInvariant
+    - old: "\t\t*vaulttypes.MsgUpdateParams,\n\t\treturn true\n"
+      new: "\t\t*vaulttypes.MsgUpdateParams:\n\t\treturn true\n"
+      file_match: lib/ante/unsupported_msgs.go
+
+    # app/msgs/internal_msgs.go: remove crisis comment block
+    - old: "\t\t// crisis\n"
+      new: ""
+      file_match: app/msgs/internal_msgs.go
+
+    # app/msgs/unsupported_msgs.go: remove MsgVerifyInvariant comment block
+    - old: |
+        
+                // Disable MsgVerifyInvariant in the crisis module, since:
+                // 1. We currently do not rely on crisis module for any invariant assertion.
+                // 2. MsgVerifyInvariant can potentially be abused to consume massive compute.
+      new: "\n"
+      file_match: app/msgs/unsupported_msgs.go
+
+    # app/msgs/internal_msgs_test.go: remove stale MsgSetProposers entries
+    - old: "\t\t\"/cosmos.staking.v1beta1.MsgSetProposers\",\n"
+      new: ""
+      file_match: app/msgs/internal_msgs_test.go
+
+    - old: "\t\t\"/cosmos.staking.v1beta1.MsgSetProposersResponse\",\n"
+      new: ""
+      file_match: app/msgs/internal_msgs_test.go
+
+    - old: "\t\t\"/cosmos.crisis.v1beta1.MsgUpdateParams\",\n"
+      new: ""
+      file_match: app/msgs/internal_msgs_test.go
+
+    - old: "\t\t\"/cosmos.crisis.v1beta1.MsgUpdateParamsResponse\",\n"
+      new: ""
+      file_match: app/msgs/internal_msgs_test.go
+
+    - old: "\t\t\"/cosmos.crisis.v1beta1.MsgVerifyInvariant\",\n"
+      new: ""
+      file_match: app/msgs/unsupported_msgs_test.go
+
+    - old: "\t\t\"/cosmos.crisis.v1beta1.MsgVerifyInvariantResponse\",\n"
+      new: ""
+      file_match: app/msgs/unsupported_msgs_test.go
+
+# ── verification ────────────────────────────────────────────────────────────
+verification:
+  must_not_import:
+    - github.com/cosmos/cosmos-sdk/x/crisis
+  must_not_contain:
+    - pattern: app.CrisisKeeper
+    - pattern: crisistypes.StoreKey
+    - pattern: crisis.AddModuleInitFlags
+    - pattern: RegisterInvariants
