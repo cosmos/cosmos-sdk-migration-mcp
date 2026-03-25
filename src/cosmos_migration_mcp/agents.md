@@ -1,5 +1,8 @@
 # Migration Agent Orchestration Guide
 
+> **Canonical upgrade guide**: https://github.com/cosmos/cosmos-sdk/blob/main/UPGRADING.md
+> Consult this for the latest breaking changes and migration instructions.
+
 This file tells an AI agent how to migrate a Cosmos SDK chain repo from one SDK
 version to another. Read it in full before touching any files.
 
@@ -16,7 +19,7 @@ The goal is a chain repo that builds cleanly against the v54 SDK with no
 references to removed or deprecated modules.
 
 The migration is **spec-driven**: each component with breaking changes has a YAML
-spec in `tools/migration/migration-spec/v50-to-v54/`. Your job is to:
+spec available via the MCP `specs://v50-to-v54/` resource. Your job is to:
 
 1. Scan the target repo to detect which specs apply.
 2. Apply each relevant spec in dependency order.
@@ -27,27 +30,33 @@ spec in `tools/migration/migration-spec/v50-to-v54/`. Your job is to:
 
 ## Where to look
 
-```
-tools/migration/
-  agents.md                      ← this file
-  migration-spec/v50-to-v54/        ← one YAML file per migration concern
-    core.yaml                    ← always apply first
-    store-v2.yaml
-    bank-endblock.yaml
-    crisis.yaml
-    circuit.yaml
-    nft.yaml
-    group.yaml                   ← fatal if detected; stop immediately
-    gov.yaml
-    gov-hooks.yaml
-    epochs.yaml
-    epochs-app-module.yaml
-    ante.yaml
-    app-structure.yaml           ← apply last
-```
+This guide and the migration specs are available via MCP resources. Use these URIs
+to access them within your agent environment:
 
-The target chain repo (the one you are migrating) is a separate directory,
-**not** this tools/ tree. Never modify files in tools/migration/ itself.
+- **This orchestration guide**: `agents://orchestration`
+- **Migration specs listing**: `specs://v50-to-v54/index`
+- **Individual specs** (e.g., core, crisis, etc.): `specs://v50-to-v54/{spec_id}`
+  - Examples: `specs://v50-to-v54/core`, `specs://v50-to-v54/crisis`, `specs://v50-to-v54/group`
+- **Upstream Cosmos SDK v0.54 upgrade docs**: `docs://upgrading/v0.54`
+
+The migration specs available are:
+- `core.yaml` — always apply first
+- `store-v2.yaml`
+- `bank-endblock.yaml`
+- `crisis.yaml`
+- `circuit.yaml`
+- `nft.yaml`
+- `group.yaml` — fatal if detected; stop immediately
+- `gov.yaml`
+- `gov-hooks.yaml`
+- `epochs.yaml`
+- `epochs-app-module.yaml`
+- `ante.yaml`
+- `app-structure.yaml` — apply last
+
+The target chain repo (the one you are migrating) is a separate directory. Never
+modify files in the migration specs themselves; only apply their transformations
+to the target repo.
 
 ---
 

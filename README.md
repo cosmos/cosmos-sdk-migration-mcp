@@ -54,6 +54,12 @@ Add to `claude_desktop_config.json`:
 claude mcp add cosmos-migration -- cosmos-migration-mcp
 ```
 
+## Reference
+
+- **[Canonical Cosmos SDK Upgrade Guide](https://github.com/cosmos/cosmos-sdk/blob/main/UPGRADING.md)** — The official upstream source for breaking changes and migration instructions for all Cosmos SDK versions.
+
+> This MCP server bundles snapshots of the v0.54 upgrade documentation and migration specs. Always consult the canonical upstream guide for the latest information and breaking changes.
+
 ## Tools
 
 | Tool | Description |

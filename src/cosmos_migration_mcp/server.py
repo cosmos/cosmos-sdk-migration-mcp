@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
@@ -60,7 +61,7 @@ def scan_chain_tool(chain_dir: str) -> dict[str, Any]:
     Args:
         chain_dir: Absolute path to the chain repository root.
     """
-    return asdict(_scan_chain_refined(chain_dir))
+    return asdict(_scan_chain_refined(chain_dir, skip_dry_run=True))
 
 
 @mcp.tool()
@@ -268,7 +269,7 @@ def get_spec(spec_id: str) -> dict[str, Any]:
 @mcp.tool()
 def check_warnings(chain_dir: str) -> dict[str, Any]:
     """Check a chain directory for fatal and non-fatal migration warnings."""
-    scan = _scan_chain_refined(chain_dir)
+    scan = _scan_chain_refined(chain_dir, skip_dry_run=True)
     return {
         "chain_dir": chain_dir,
         "fatal_blocks": scan.fatal_blocks,
@@ -278,9 +279,32 @@ def check_warnings(chain_dir: str) -> dict[str, Any]:
     }
 
 
-def _scan_chain_refined(chain_dir: str, specs: list[Spec] | None = None) -> ScanResult:
+def _scan_chain_refined(
+    chain_dir: str,
+    specs: list[Spec] | None = None,
+    *,
+    skip_dry_run: bool = False,
+) -> ScanResult:
+    """Scan a chain and optionally filter out already-satisfied specs.
+
+    When *skip_dry_run* is True the expensive per-spec dry-run preview is
+    skipped and all detection-matched specs are returned as-is.  This is
+    suitable for lightweight scan-only callers (``scan_chain_tool``,
+    ``check_warnings``) that don't need the extra precision.
+    """
     specs = specs or load_specs()
     raw_scan = scan_chain(chain_dir, specs)
+
+    if skip_dry_run:
+        return ScanResult(
+            chain_dir=raw_scan.chain_dir,
+            sdk_version=raw_scan.sdk_version,
+            applicable_specs=raw_scan.applicable_specs,
+            warnings=_dedupe_warning_entries(raw_scan.warnings),
+            fatal_blocks=raw_scan.fatal_blocks,
+            detection_details=raw_scan.detection_details,
+        )
+
     spec_map = {spec.id: spec for spec in specs}
     fatal_ids = {entry["spec_id"] for entry in raw_scan.fatal_blocks}
 
@@ -389,6 +413,8 @@ def migrate_chain(chain_dir: str) -> str:
     """
     return f"""You are migrating the Cosmos SDK chain at: {chain_dir}
 
+For the latest upstream breaking changes, consult: https://github.com/cosmos/cosmos-sdk/blob/main/UPGRADING.md
+
 Use the migration specs together with the repository docs resources when a
 spec includes manual steps or when a chain deviates from simapp.
 
@@ -429,6 +455,8 @@ def assess_chain(chain_dir: str) -> str:
     """
     return f"""Assess the migration readiness of the chain at: {chain_dir}
 
+For the latest upstream breaking changes, consult: https://github.com/cosmos/cosmos-sdk/blob/main/UPGRADING.md
+
 1. Call `scan_chain_tool(chain_dir="{chain_dir}")`.
 2. Call `get_migration_plan(chain_dir="{chain_dir}")`.
 3. Summarize:
@@ -450,6 +478,8 @@ def debug_build_failure(chain_dir: str, error_output: str) -> str:
     Diagnose a post-migration build failure.
     """
     return f"""The chain at {chain_dir} failed to build after migration.
+
+For the latest upstream breaking changes, consult: https://github.com/cosmos/cosmos-sdk/blob/main/UPGRADING.md
 
 Build error output:
 ```
@@ -638,7 +668,7 @@ def _apply_go_mod_changes(
             }
         )
         if not dry_run:
-            Path(path).write_text(updated)
+            _safe_write_file(path, updated)
 
 
 def _apply_import_rewrites(
@@ -675,7 +705,7 @@ def _apply_import_rewrites(
                 }
             )
             if not dry_run:
-                Path(path).write_text(updated)
+                _safe_write_file(path, updated)
 
 
 def _apply_statement_removals(
@@ -712,7 +742,7 @@ def _apply_statement_removals(
             }
         )
         if not dry_run:
-            Path(path).write_text(updated)
+            _safe_write_file(path, updated)
 
 
 def _apply_map_entry_removals(
@@ -751,7 +781,7 @@ def _apply_map_entry_removals(
             }
         )
         if not dry_run:
-            Path(path).write_text(updated)
+            _safe_write_file(path, updated)
 
 
 def _apply_call_arg_edits(
@@ -786,7 +816,7 @@ def _apply_call_arg_edits(
             }
         )
         if not dry_run:
-            Path(path).write_text(updated)
+            _safe_write_file(path, updated)
 
 
 def _apply_special_cases(
@@ -825,7 +855,7 @@ def _apply_special_cases(
                 }
             )
             if not dry_run:
-                Path(path).write_text(updated)
+                _safe_write_file(path, updated)
 
 
 def _apply_text_replacements(
@@ -868,7 +898,7 @@ def _apply_text_replacements(
                 }
             )
             if not dry_run:
-                Path(path).write_text(updated)
+                _safe_write_file(path, updated)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1498,6 +1528,40 @@ def _remove_empty_go_mod_blocks(content: str) -> str:
     content = re.sub(r"(?ms)^require\s*\(\s*\)\n?", "", content)
     content = re.sub(r"(?ms)^replace\s*\(\s*\)\n?", "", content)
     return content
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SAFE FILE I/O
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _safe_write_file(path: str, content: str) -> None:
+    """Atomically write *content* to *path* using a temp-file + rename.
+
+    This prevents partial writes from leaving the repo in a half-migrated
+    state if the process is interrupted or the disk is full.
+    """
+    target = Path(path)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(target.parent),
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    closed = False
+    try:
+        os.write(fd, content.encode())
+        os.fsync(fd)
+        os.close(fd)
+        closed = True
+        os.replace(tmp_path, path)
+    except BaseException:
+        if not closed:
+            os.close(fd)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

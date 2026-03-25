@@ -11,8 +11,7 @@ description: |
   - Keeps all keeper wiring, store keys, and module registrations in place
 
   What this spec does NOT do:
-  - Remove the NFTKeeper from your app
-  - Remove nft from module ordering
+  - Remove the NFTKeeper from your app (it remains wired)
 
   If you want to fully remove nft, remove app.NFTKeeper and all nft.*
   module ordering references manually.

@@ -77,13 +77,8 @@ changes:
     # The two specs are complementary: circuit.yaml handles imports/warnings,
     # ante.yaml handles the ante.go deletion and call-site rewrite.
 
-  # ── file removals ──────────────────────────────────────────────────────
-  # ante.go contains the custom ante handler that references circuitante.
-  # After this migration, ante.NewAnteHandler is called directly, so the
-  # wrapper file is no longer needed.
-  file_removals:
-    - file_name: ante.go
-      contains_must_match: circuitante
+  # NOTE: ante.go deletion is handled exclusively by ante.yaml.
+  # Do not declare file_removals here to avoid duplication.
 
 # ── verification ────────────────────────────────────────────────────────────
 verification:

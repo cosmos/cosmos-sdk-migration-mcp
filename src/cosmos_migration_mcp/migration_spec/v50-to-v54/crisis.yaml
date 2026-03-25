@@ -66,10 +66,6 @@ changes:
       keys:
         - '"/cosmos.crisis.v1beta1.MsgUpdateParams"'
         - '"/cosmos.crisis.v1beta1.MsgUpdateParamsResponse"'
-        # MsgSetProposers was also removed in v54 (staking, not crisis, but
-        # grouped here because the map entry removal happens in the same pass).
-        - '"/cosmos.staking.v1beta1.MsgSetProposers"'
-        - '"/cosmos.staking.v1beta1.MsgSetProposersResponse"'
     - map_var: UnsupportedMsgSamples
       keys:
         - '"/cosmos.crisis.v1beta1.MsgVerifyInvariant"'
@@ -145,10 +141,6 @@ changes:
       new: "\n"
       file_match: lib/ante/internal_msg.go
 
-    - old: "\t\t*staking.MsgSetProposers,\n"
-      new: ""
-      file_match: lib/ante/internal_msg.go
-
     # lib/ante/unsupported_msgs.go: remove MsgVerifyInvariant case
     - old: "\t\t*crisis.MsgVerifyInvariant:\n"
       new: ""
@@ -173,15 +165,7 @@ changes:
       new: "\n"
       file_match: app/msgs/unsupported_msgs.go
 
-    # app/msgs/internal_msgs_test.go: remove stale MsgSetProposers entries
-    - old: "\t\t\"/cosmos.staking.v1beta1.MsgSetProposers\",\n"
-      new: ""
-      file_match: app/msgs/internal_msgs_test.go
-
-    - old: "\t\t\"/cosmos.staking.v1beta1.MsgSetProposersResponse\",\n"
-      new: ""
-      file_match: app/msgs/internal_msgs_test.go
-
+    # app/msgs/internal_msgs_test.go: remove stale crisis entries
     - old: "\t\t\"/cosmos.crisis.v1beta1.MsgUpdateParams\",\n"
       new: ""
       file_match: app/msgs/internal_msgs_test.go
