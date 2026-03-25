@@ -45,9 +45,19 @@ changes:
 
   imports:
     rewrites:
+      # Rewrite the main store types import.  Use all_packages so that
+      # sub-packages like cosmossdk.io/store/types are also rewritten.
       - old: cosmossdk.io/store
         new: github.com/cosmos/cosmos-sdk/store/v2
         all_packages: true
+      # The metrics sub-package does not exist under store/v2.  The
+      # all_packages rewrite above produces the invalid path
+      # github.com/cosmos/cosmos-sdk/store/v2/metrics.  This second
+      # pass undoes that by removing the broken import entirely.
+      # Chains that used storemetrics.NewNoOpMetrics() will need to
+      # update call sites as part of the manual step below.
+    removals:
+      - github.com/cosmos/cosmos-sdk/store/v2/metrics
 
   statement_removals:
     - call_pattern: SimWriteState
@@ -62,10 +72,18 @@ manual_steps:
       Review rewritten NewUncachedContext call sites. Some tests need semantic
       follow-up beyond the mechanical method rename because store-v2 no longer
       permits writes to bypass cache/branch isolation.
+  - id: store-metrics-removal
+    description: |
+      The cosmossdk.io/store/metrics package does not exist in store/v2.
+      Files that imported storemetrics (typically test helpers) had the
+      import removed.  Update any remaining storemetrics.NewNoOpMetrics()
+      call sites — in v0.54, use coretesting.NewNopLogger() or remove
+      the metrics argument entirely if the keeper no longer requires it.
 
 verification:
   must_not_import:
     - cosmossdk.io/store
+    - github.com/cosmos/cosmos-sdk/store/v2/metrics
   must_not_contain:
     # Exclude baseapp/test_helpers.go which *defines* the deprecated function
     - pattern: NewUncachedContext(

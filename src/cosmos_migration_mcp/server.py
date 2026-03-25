@@ -114,12 +114,9 @@ def get_migration_plan(chain_dir: str) -> dict[str, Any]:
 
     if scan.fatal_blocks:
         result.update({
-            "status": "blocked",
             "fatal_blocks": scan.fatal_blocks,
             "fatal_spec_ids": scan.fatal_spec_ids,
-            "message": "Migration cannot proceed. Resolve fatal blocks first.",
         })
-        return result
 
     spec_map = {spec.id: spec for spec in specs}
     plan: list[dict[str, Any]] = []
@@ -151,13 +148,25 @@ def get_migration_plan(chain_dir: str) -> dict[str, Any]:
             }
         )
 
+    status = "ready"
+    message = None
+    if scan.fatal_blocks:
+        status = "has_fatal_warnings"
+        message = (
+            "Some specs have fatal warnings (see fatal_blocks). "
+            "Non-fatal specs can still be applied individually via apply_spec. "
+            "Resolve fatal blocks manually or skip them to proceed."
+        )
+
     result.update({
-        "status": "ready",
+        "status": status,
         "specs_to_apply": len(plan),
         "plan": plan,
         "warnings": scan.warnings,
         "application_order": [entry["spec_id"] for entry in plan],
     })
+    if message:
+        result["message"] = message
     return result
 
 
@@ -769,6 +778,8 @@ def _execute_spec(chain_dir: str, spec: Spec, dry_run: bool) -> dict[str, Any]:
         "call_arg_edits": [],
         "special_case_rewrites": [],
         "text_replacements": [],
+        "import_removals": [],
+        "line_removals": [],
         "import_additions": [],
         "manual_steps_required": list(spec.manual_steps),
         "warnings": [],
@@ -780,11 +791,13 @@ def _execute_spec(chain_dir: str, spec: Spec, dry_run: bool) -> dict[str, Any]:
     _apply_file_removals(chain_dir, changes.get("file_removals", []), dry_run, results)
     _apply_go_mod_changes(chain_dir, changes.get("go_mod", {}), dry_run, results)
     _apply_import_rewrites(chain_dir, import_changes.get("rewrites", []), dry_run, results)
+    _apply_import_removals(chain_dir, import_changes.get("removals", []), dry_run, results)
     _apply_statement_removals(chain_dir, changes.get("statement_removals", []), dry_run, results)
     _apply_map_entry_removals(chain_dir, changes.get("map_entry_removals", []), dry_run, results)
     _apply_call_arg_edits(chain_dir, changes.get("call_arg_edits", []), dry_run, results)
     _apply_special_cases(chain_dir, changes.get("special_cases", []), dry_run, results)
     _apply_text_replacements(chain_dir, changes.get("text_replacements", []), dry_run, results)
+    _apply_line_removals(chain_dir, changes.get("line_removals", []), dry_run, results)
     _apply_required_imports(chain_dir, changes.get("required_imports", []), dry_run, results)
 
     for warning in import_changes.get("warnings", []):
@@ -827,11 +840,13 @@ def _results_have_effective_changes(results: dict[str, Any]) -> bool:
         "go_mod_changes",
         "file_removals",
         "import_rewrites",
+        "import_removals",
         "statement_removals",
         "map_entry_removals",
         "call_arg_edits",
         "special_case_rewrites",
         "text_replacements",
+        "line_removals",
         "import_additions",
     )
     return any(results.get(key) for key in change_keys)
@@ -840,9 +855,9 @@ def _results_have_effective_changes(results: dict[str, Any]) -> bool:
 def _validate_changed_files_syntax(chain_dir: str, results: dict[str, Any]) -> list[dict[str, str]]:
     """Run gofmt -e on files changed by spec application to catch syntax errors."""
     changed_files: set[str] = set()
-    for key in ("import_rewrites", "statement_removals", "map_entry_removals",
-                "call_arg_edits", "special_case_rewrites", "text_replacements",
-                "import_additions"):
+    for key in ("import_rewrites", "import_removals", "statement_removals",
+                "map_entry_removals", "call_arg_edits", "special_case_rewrites",
+                "text_replacements", "line_removals", "import_additions"):
         for entry in results.get(key, []):
             f = entry.get("file", "")
             if f and f.endswith(".go"):
@@ -997,6 +1012,69 @@ def _apply_import_rewrites(
             )
             if not dry_run:
                 _safe_write_file(path, updated)
+
+
+def _apply_import_removals(
+    chain_dir: str,
+    removals: list[str],
+    dry_run: bool,
+    results: dict[str, Any],
+) -> None:
+    """Remove Go import lines whose path matches any of the given prefixes.
+
+    Each entry in *removals* is an import path prefix.  Any import line
+    whose quoted path starts with that prefix is removed (including aliased
+    imports).  If the removal empties the enclosing ``import (...)`` block
+    the whole block is removed.
+    """
+    if not removals:
+        return
+    import re
+
+    go_files = list_go_files(chain_dir)
+    for path in go_files:
+        content = _read_file(path)
+        # Quick check – skip files that don't mention any prefix.
+        if not any(prefix in content for prefix in removals):
+            continue
+
+        lines = content.splitlines(keepends=True)
+        new_lines: list[str] = []
+        removed_prefixes: list[str] = []
+
+        for line in lines:
+            stripped = line.lstrip()
+            should_remove = False
+            # Match lines like:  alias "path/to/pkg"  or  "path/to/pkg"
+            for prefix in removals:
+                # Check both quoted forms: with and without alias
+                if f'"{prefix}' in stripped and stripped.rstrip().endswith('"'):
+                    should_remove = True
+                    removed_prefixes.append(prefix)
+                    break
+            if not should_remove:
+                new_lines.append(line)
+
+        updated = "".join(new_lines)
+        # Clean up empty import blocks: import (\n)\n
+        updated = re.sub(r'import\s*\(\s*\n\s*\)', '', updated)
+        # Clean up resulting double blank lines
+        while "\n\n\n" in updated:
+            updated = updated.replace("\n\n\n", "\n\n")
+
+        if updated == content:
+            continue
+
+        relpath = os.path.relpath(path, chain_dir)
+        results["import_removals"].append(
+            {
+                "file": relpath,
+                "action": "would_remove" if dry_run else "removed",
+                "prefixes": list(set(removed_prefixes)),
+            }
+        )
+        if not dry_run:
+            _safe_write_file(path, updated)
 
 
 def _apply_statement_removals(
@@ -1190,6 +1268,64 @@ def _apply_text_replacements(
             )
             if not dry_run:
                 _safe_write_file(path, updated)
+
+
+def _apply_line_removals(
+    chain_dir: str,
+    removals: list[dict[str, Any]],
+    dry_run: bool,
+    results: dict[str, Any],
+) -> None:
+    """Remove whole lines that contain a given substring.
+
+    Each entry has:
+      - ``contains``: substring to match (required)
+      - ``file_match``: optional filename filter (e.g. ``keepers.go``)
+
+    If removing a line would leave a trailing blank line directly after a
+    ``{`` line, the extra blank line is collapsed.
+    """
+    if not removals:
+        return
+
+    for path in list_go_files(chain_dir):
+        filename = os.path.basename(path)
+        content = _read_file(path)
+        updated = content
+        matched_patterns: list[str] = []
+
+        for entry in removals:
+            contains = entry.get("contains", "")
+            file_match = entry.get("file_match", "")
+            if not contains:
+                continue
+            if file_match and file_match not in filename and not path.endswith(file_match):
+                continue
+            if contains not in updated:
+                continue
+
+            lines = updated.splitlines(keepends=True)
+            new_lines = [ln for ln in lines if contains not in ln]
+            updated = "".join(new_lines)
+            matched_patterns.append(contains)
+
+        # Clean up double blank lines
+        while "\n\n\n" in updated:
+            updated = updated.replace("\n\n\n", "\n\n")
+
+        if updated == content:
+            continue
+
+        relpath = os.path.relpath(path, chain_dir)
+        results["line_removals"].append(
+            {
+                "file": relpath,
+                "action": "would_remove" if dry_run else "removed",
+                "patterns": matched_patterns,
+            }
+        )
+        if not dry_run:
+            _safe_write_file(path, updated)
 
 
 def _apply_required_imports(
@@ -1739,7 +1875,12 @@ def _arg_matches(arg: str, pattern: str) -> bool:
 
 
 def _normalize_arg(value: str) -> str:
-    return re.sub(r"\s+", "", value).rstrip(",")
+    # Strip single-line comments before normalising, so that
+    # "// some comment\ncrisistypes.ModuleName" matches "crisistypes.ModuleName".
+    cleaned = re.sub(r"//[^\n]*\n?", "", value)
+    # Strip block comments too.
+    cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+    return re.sub(r"\s+", "", cleaned).rstrip(",")
 
 
 def _normalize_args_list(args: list[str]) -> list[str]:

@@ -38,6 +38,10 @@ changes:
 
   # ── imports ─────────────────────────────────────────────────────────────
   imports:
+    removals:
+      - github.com/cosmos/cosmos-sdk/x/crisis
+      - cosmossdk.io/x/crisis
+      - github.com/cosmos/cosmos-sdk/contrib/x/crisis
     warnings:
       - prefix: github.com/cosmos/cosmos-sdk/x/crisis
         message: >
@@ -57,10 +61,14 @@ changes:
 
   # ── statement removals ──────────────────────────────────────────────────
   # Remove keeper initialisation and adjacent wiring statements.
+  # Both app.CrisisKeeper and app.Keepers.CrisisKeeper patterns are used
+  # across different chain structures.
   statement_removals:
     - assign_target: app.CrisisKeeper
+    - assign_target: app.Keepers.CrisisKeeper
     - call_pattern: crisis.AddModuleInitFlags
     - call_pattern: app.ModuleManager.RegisterInvariants
+    - call_pattern: app.Keepers.CrisisKeeper.AssertInvariants
 
   # ── map entry removals ──────────────────────────────────────────────────
   # Remove crisis message types from internal message maps.
@@ -124,6 +132,13 @@ changes:
     - import_path: github.com/cosmos/cosmos-sdk/x/bank/types
       alias: banktypes
       symbol: banktypes.ModuleName
+
+  # ── line removals ──────────────────────────────────────────────────────
+  # Remove struct field declarations and other one-liner references that
+  # are not covered by statement_removals or call_arg_edits.
+  line_removals:
+    - contains: "CrisisKeeper"
+      file_match: keepers.go
 
   # ── text replacements ────────────────────────────────────────────────────
   # Handle patterns too nested for AST: flag wiring, subspace registration,
@@ -196,9 +211,13 @@ changes:
 verification:
   must_not_import:
     - github.com/cosmos/cosmos-sdk/x/crisis
+    - cosmossdk.io/x/crisis
+    - github.com/cosmos/cosmos-sdk/contrib/x/crisis
   must_not_contain:
     - pattern: app.CrisisKeeper
+    - pattern: app.Keepers.CrisisKeeper
     - pattern: crisistypes.StoreKey
+    - pattern: crisistypes.ModuleName
     - pattern: crisis.AddModuleInitFlags
     # Scoped to app files — the SDK framework stubs in types/module/ and
     # testutil/mock/ define RegisterInvariants as part of the module
