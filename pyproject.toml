@@ -1,6 +1,6 @@
 [project]
 name = "cosmos-migration-mcp"
-version = "0.1.2"
+version = "0.1.4"
 description = "MCP server for Cosmos SDK chain migration (v50+ -> v54)"
 readme = "README.md"
 requires-python = ">=3.10"
