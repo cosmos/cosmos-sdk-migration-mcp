@@ -1,0 +1,50 @@
+id: sr25519-removal-warning
+title: sr25519 crypto support removed
+version: v50+ -> v54
+description: |
+  Cosmos SDK v0.54 removed sr25519 crypto support as part of the CometBFT v1.x
+  migration. The sr25519 signature algorithm is no longer available in the
+  cryptographic library.
+
+  Chains that use sr25519 keys need to perform a manual migration to an
+  alternative signature scheme (e.g., ed25519 or secp256k1). This spec detects
+  sr25519 usage and emits a non-fatal warning.
+
+  What this spec does:
+  - Detects sr25519 usage patterns in Go files
+  - Emits an end-of-run warning about the removal
+  - Does NOT apply any automatic changes (this requires manual migration)
+
+  What you need to do:
+  - Audit your chain's key infrastructure for sr25519 usage
+  - Plan a migration path for sr25519-based validators or accounts
+  - Implement the migration in your chain code
+
+upstream_sources:
+  - docs://upgrading/v0.54
+  - docs://changelog/v0.54-breaking (#24414)
+
+detection:
+  sdk_version:
+    max_exclusive: v0.54.0-0
+  patterns:
+    - sr25519
+    - SR25519
+
+changes:
+  imports:
+    warnings:
+      - pattern: sr25519
+        message: >
+          sr25519 crypto support has been removed in v0.54. Chains using
+          sr25519 keys need manual migration to ed25519 or secp256k1.
+        fatal: false
+      - pattern: SR25519
+        message: >
+          sr25519 crypto support has been removed in v0.54. Chains using
+          sr25519 keys need manual migration to ed25519 or secp256k1.
+        fatal: false
+
+verification:
+  must_not_contain:
+    - pattern: sr25519

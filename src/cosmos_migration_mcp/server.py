@@ -240,6 +240,115 @@ def verify_build(chain_dir: str, timeout: int = 300) -> dict[str, Any]:
 
 
 @mcp.tool()
+def run_go_mod_tidy(chain_dir: str, timeout: int = 120) -> dict[str, Any]:
+    """
+    Run `go mod tidy` in the chain directory and return structured results.
+
+    This should be called after all specs have been applied to clean up
+    go.mod and go.sum dependencies.
+
+    Args:
+        chain_dir: Absolute path to the chain repository root.
+        timeout: Maximum seconds to wait (default 120).
+    """
+    try:
+        result = subprocess.run(
+            ["go", "mod", "tidy"],
+            capture_output=True,
+            text=True,
+            cwd=chain_dir,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"passed": False, "error": f"go mod tidy timed out after {timeout}s"}
+    except FileNotFoundError:
+        return {"passed": False, "error": "go binary not found in PATH"}
+
+    if result.returncode == 0:
+        return {"passed": True, "output": result.stdout[:2000]}
+    return {
+        "passed": False,
+        "error": result.stderr[:3000],
+        "output": result.stdout[:2000],
+    }
+
+
+@mcp.tool()
+def run_tests(chain_dir: str, timeout: int = 600, short: bool = True) -> dict[str, Any]:
+    """
+    Run `go test` in the chain directory and return structured results.
+
+    Args:
+        chain_dir: Absolute path to the chain repository root.
+        timeout: Maximum seconds to wait (default 600).
+        short: If True, run with `-short` flag (default True).
+    """
+    cmd = ["go", "test"]
+    if short:
+        cmd.append("-short")
+    cmd.append("./...")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=chain_dir,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"passed": False, "error": f"Tests timed out after {timeout}s"}
+    except FileNotFoundError:
+        return {"passed": False, "error": "go binary not found in PATH"}
+
+    if result.returncode == 0:
+        return {"passed": True, "output": result.stdout[:5000]}
+    return {
+        "passed": False,
+        "output": result.stdout[:3000],
+        "error": result.stderr[:3000],
+    }
+
+
+@mcp.tool()
+def show_diff(chain_dir: str, staged_only: bool = False) -> dict[str, Any]:
+    """
+    Show git diff of changes in the chain directory.
+
+    Useful after applying specs to review what was modified.
+
+    Args:
+        chain_dir: Absolute path to the chain repository root.
+        staged_only: If True, show only staged changes (git diff --cached).
+    """
+    cmd = ["git", "diff"]
+    if staged_only:
+        cmd.append("--cached")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=chain_dir,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return {"error": "git binary not found in PATH"}
+    except subprocess.TimeoutExpired:
+        return {"error": "git diff timed out"}
+
+    if result.returncode != 0:
+        return {"error": f"git diff failed: {result.stderr[:1000]}"}
+
+    diff = result.stdout
+    return {
+        "has_changes": bool(diff.strip()),
+        "diff": diff[:10000] + ("\n... (truncated)" if len(diff) > 10000 else ""),
+    }
+
+
+@mcp.tool()
 def list_specs() -> list[dict[str, Any]]:
     """List all available migration specs with metadata."""
     specs = load_specs()
@@ -443,7 +552,14 @@ spec includes manual steps or when a chain deviates from simapp.
 8. **Build**: Call `verify_build(chain_dir="{chain_dir}")`. If it fails, use
    the `debug_build_failure` prompt.
 
-9. **Report**: Summarize what was changed, which warnings remain, and which
+9. **Go mod tidy**: Call `run_go_mod_tidy(chain_dir="{chain_dir}")` to clean
+   up go.mod and go.sum after all specs are applied.
+
+10. **Upgrade Handler**: Remind the operator to implement an on-chain upgrade
+   handler. See `docs://upgrading/v0.54` for a reference example using
+   `app.UpgradeKeeper.SetUpgradeHandler` and `UpgradeStoreLoader`.
+
+11. **Report**: Summarize what was changed, which warnings remain, and which
    manual steps, if any, still require operator attention.
 """
 
@@ -467,6 +583,7 @@ For the latest upstream breaking changes, consult: https://github.com/cosmos/cos
    - Approximate files affected
    - Manual steps required
    - Estimated complexity: simple, moderate, or complex
+   - Reminder: an on-chain upgrade handler will be required (see docs://upgrading/v0.54)
 
 Do NOT modify any files.
 """
@@ -492,7 +609,8 @@ Diagnose the failure:
 2. Determine whether this maps to:
    - a missed spec application,
    - a manual step from a spec,
-   - a chain-specific customization that the specs intentionally leave alone.
+   - a chain-specific customization that the specs intentionally leave alone,
+   - a missing upgrade handler setup.
 3. Use `docs://upgrading/v0.54` and `docs://changelog/v0.54-breaking` for
    ambiguous API migrations.
 4. Suggest or apply a focused fix, then re-run
@@ -1596,62 +1714,68 @@ def _matches_file(relpath: str, file_match: str) -> bool:
 
 def _estimate_affected_files(chain_dir: str, spec: Spec) -> list[str]:
     affected: set[str] = set()
-    go_files = list_go_files(chain_dir)
-    go_mod_files = list_go_mod_files(chain_dir)
-    all_text_files = _iter_text_files(chain_dir)
     changes = spec.changes
 
+    # Collect go_mod files if needed
     if changes.get("go_mod"):
-        for path in go_mod_files:
+        for path in list_go_mod_files(chain_dir):
             affected.add(os.path.relpath(path, chain_dir))
 
-    for replacement in changes.get("text_replacements", []):
-        old = replacement.get("old", "")
-        file_match = replacement.get("file_match", "")
-        for path in all_text_files:
-            relpath = os.path.relpath(path, chain_dir)
-            if file_match and not _matches_file(relpath, file_match):
-                continue
-            if old and old in _read_file(path):
-                affected.add(relpath)
-
-    for rewrite in changes.get("imports", {}).get("rewrites", []):
-        for path in go_files:
-            if rewrite["old"] in _read_file(path):
-                affected.add(os.path.relpath(path, chain_dir))
-
+    # Collect file_removals by filename (not content-based)
     for removal in changes.get("file_removals", []):
         for path in _find_files(chain_dir, removal["file_name"]):
             affected.add(os.path.relpath(path, chain_dir))
 
+    # Build a list of (pattern, file_match_filter) tuples for content-based search
+    search_patterns: list[tuple[str, str]] = []
+
+    for replacement in changes.get("text_replacements", []):
+        old = replacement.get("old", "")
+        if old:
+            search_patterns.append((old, replacement.get("file_match", "")))
+
+    for rewrite in changes.get("imports", {}).get("rewrites", []):
+        old = rewrite.get("old", "")
+        if old:
+            search_patterns.append((old, ""))
+
     for removal in changes.get("statement_removals", []):
         anchor = removal.get("assign_target") or removal.get("call_pattern", "")
-        for path in go_files:
-            if anchor and anchor in _read_file(path):
-                affected.add(os.path.relpath(path, chain_dir))
+        if anchor:
+            search_patterns.append((anchor, ""))
 
     for removal in changes.get("map_entry_removals", []):
         for key in removal.get("keys", []):
-            for path in go_files:
-                if key in _read_file(path):
-                    affected.add(os.path.relpath(path, chain_dir))
+            search_patterns.append((key, ""))
 
     for edit in changes.get("call_arg_edits", []):
         anchor = edit.get("func_pattern") or edit.get("method_name", "")
-        for path in go_files:
-            if anchor and anchor in _read_file(path):
-                affected.add(os.path.relpath(path, chain_dir))
+        if anchor:
+            search_patterns.append((anchor, ""))
 
-    for special_case in changes.get("special_cases", []):
-        anchors = {
-            "gov_new_keeper": "NewKeeper(",
-            "uncached_context": "NewUncachedContext(",
-            "gov_hooks_after_proposal_submission": "AfterProposalSubmission(",
-        }
-        anchor = anchors.get(special_case, "")
-        for path in go_files:
-            if anchor and anchor in _read_file(path):
-                affected.add(os.path.relpath(path, chain_dir))
+    special_anchors = {
+        "gov_new_keeper": "NewKeeper(",
+        "uncached_context": "NewUncachedContext(",
+        "gov_hooks_after_proposal_submission": "AfterProposalSubmission(",
+    }
+    for case_name in changes.get("special_cases", []):
+        anchor = special_anchors.get(case_name, "")
+        if anchor:
+            search_patterns.append((anchor, ""))
+
+    if not search_patterns:
+        return sorted(affected)[:80]
+
+    # Single pass: read each file once and check all patterns
+    for path in _iter_text_files(chain_dir):
+        relpath = os.path.relpath(path, chain_dir)
+        content = _read_file(path)
+        for pattern, file_match in search_patterns:
+            if file_match and not _matches_file(relpath, file_match):
+                continue
+            if pattern in content:
+                affected.add(relpath)
+                break  # no need to check more patterns for this file
 
     return sorted(affected)[:80]
 

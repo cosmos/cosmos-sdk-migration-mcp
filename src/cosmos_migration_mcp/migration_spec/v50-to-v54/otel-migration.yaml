@@ -1,0 +1,56 @@
+id: otel-migration-warning
+title: Telemetry deprecated in favor of OpenTelemetry
+version: v50+ -> v54
+description: |
+  The go-metrics based telemetry package is deprecated in v0.54 in favor of
+  OpenTelemetry. The Cosmos SDK is moving towards the OpenTelemetry standard
+  for observability and metrics collection.
+
+  The legacy go-metrics telemetry helpers (telemetry.NewLabel, telemetry.IncrCounter,
+  telemetry.SetGauge, telemetry.MeasureSince, etc.) are still functional but
+  deprecated. New code should use OpenTelemetry directly.
+
+  What this spec does:
+  - Detects go-metrics telemetry usage patterns
+  - Emits an end-of-run warning about the deprecation
+  - Does NOT apply any automatic changes (migration is context-dependent)
+
+  What you need to do:
+  - Evaluate your telemetry requirements
+  - Plan a migration to OpenTelemetry if you use telemetry
+  - Update telemetry calls to use OpenTelemetry APIs
+  - Remove dependency on github.com/hashicorp/go-metrics when possible
+
+upstream_sources:
+  - docs://upgrading/v0.54
+  - docs://changelog/v0.54-breaking
+
+detection:
+  sdk_version:
+    max_exclusive: v0.54.0-0
+  imports:
+    - github.com/hashicorp/go-metrics
+  patterns:
+    - go-metrics
+    - telemetry.NewLabel(
+    - telemetry.IncrCounter(
+    - telemetry.SetGauge(
+    - telemetry.MeasureSince(
+
+changes:
+  imports:
+    warnings:
+      - prefix: github.com/hashicorp/go-metrics
+        message: >
+          the go-metrics telemetry package is deprecated in v0.54. Please
+          migrate to OpenTelemetry for observability. See
+          https://pkg.go.dev/go.opentelemetry.io for details.
+        fatal: false
+      - pattern: telemetry.
+        message: >
+          legacy telemetry helpers (telemetry.IncrCounter, telemetry.SetGauge,
+          etc.) are deprecated in v0.54. Please migrate to OpenTelemetry for
+          observability and metrics collection.
+        fatal: false
+
+verification:

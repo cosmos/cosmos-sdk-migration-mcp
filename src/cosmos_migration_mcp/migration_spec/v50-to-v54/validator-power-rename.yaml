@@ -1,0 +1,39 @@
+id: validator-power-rename
+title: BondedTokens → ValidatorPower rename
+version: v50+ -> v54
+description: |
+  Cosmos SDK v0.54 renames BondedTokens and TotalBondedTokens methods/types to
+  ValidatorPower and TotalValidatorPower respectively in x/staking and x/gov
+  modules. This change decouples governance power from staking, allowing
+  communities to customize which tokens confer voting power.
+
+  This spec replaces all occurrences of:
+    - BondedTokens → ValidatorPower
+    - TotalBondedTokens → TotalValidatorPower
+
+  Text replacements are ordered to match TotalBondedTokens first, preventing
+  accidental substring matching against BondedTokens.
+
+upstream_sources:
+  - docs://upgrading/v0.54
+  - docs://changelog/v0.54-breaking
+
+detection:
+  sdk_version:
+    max_exclusive: v0.54.0-0
+  patterns:
+    - BondedTokens
+    - TotalBondedTokens
+
+changes:
+  text_replacements:
+    # Replace TotalBondedTokens first to avoid substring matching
+    - old: "TotalBondedTokens"
+      new: "TotalValidatorPower"
+    - old: "BondedTokens"
+      new: "ValidatorPower"
+
+verification:
+  must_not_contain:
+    - pattern: BondedTokens
+    - pattern: TotalBondedTokens

@@ -15,6 +15,10 @@ upstream_sources:
   - docs://upgrading/v0.54
   - docs://changelog/v0.54-breaking
 
+depends_on:
+  - core-sdk-migration
+  - gov-keeper-migration
+
 detection:
   sdk_version:
     max_exclusive: v0.54.0-0

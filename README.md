@@ -70,6 +70,9 @@ claude mcp add cosmos-migration -- cosmos-migration-mcp
 | `verify_spec_tool` | Run verification checks for one spec |
 | `verify_all_specs` | Run verification for an explicit spec list or for currently detectable specs |
 | `verify_build` | Run `go build ./...` and return structured results |
+| `run_go_mod_tidy` | Run `go mod tidy` and return structured results |
+| `run_tests` | Run `go test ./...` and return structured results |
+| `show_diff` | Show git diff of changes in the chain directory |
 | `list_specs` | List all available migration specs |
 | `get_spec` | Get full content of a specific spec |
 | `check_warnings` | Check for fatal blocks and warnings |

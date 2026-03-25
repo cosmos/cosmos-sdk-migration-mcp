@@ -13,6 +13,10 @@ description: |
 upstream_sources:
   - docs://upgrading/v0.54
 
+depends_on:
+  - core-sdk-migration
+  - epochs-keeper-pointer
+
 detection:
   sdk_version:
     max_exclusive: v0.54.0-0

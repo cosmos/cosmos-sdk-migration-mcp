@@ -1,0 +1,59 @@
+id: block-gas-meter-warning
+title: Default block gas meter now disabled
+version: v50+ -> v54
+description: |
+  In Cosmos SDK v0.54, the default block gas meter is now disabled (#26138).
+  This change affects chains that rely on block-level gas metering or those
+  that enable BlockSTM (Software Transactional Memory for parallel execution).
+
+  If your chain previously relied on SetBlockGasMeter or block gas tracking,
+  you should be aware that this behavior has changed and may require
+  configuration adjustments or explicit re-enablement if your chain logic
+  depends on it.
+
+  What this spec does:
+  - Detects block gas meter usage patterns in Go files
+  - Emits an end-of-run warning about the change
+  - Does NOT apply any automatic changes (this is configuration-dependent)
+
+  What you need to do:
+  - Review your chain's app.go configuration for block gas meter setup
+  - Determine if your chain needs to explicitly enable or configure block gas metering
+  - Update your configuration or code if necessary
+  - Test BlockSTM compatibility if you use parallel execution features
+
+upstream_sources:
+  - docs://upgrading/v0.54
+  - docs://changelog/v0.54-breaking (#26138)
+
+detection:
+  sdk_version:
+    max_exclusive: v0.54.0-0
+  patterns:
+    - SetBlockGasMeter(
+    - BlockGasMeter(
+    - blockGasMeter
+
+changes:
+  imports:
+    warnings:
+      - pattern: SetBlockGasMeter(
+        message: >
+          the default block gas meter is now disabled in v0.54. Review your
+          chain configuration to determine if block gas metering should be
+          explicitly enabled.
+        fatal: false
+      - pattern: BlockGasMeter(
+        message: >
+          the default block gas meter is now disabled in v0.54. Review your
+          chain configuration to determine if block gas metering should be
+          explicitly enabled.
+        fatal: false
+      - pattern: blockGasMeter
+        message: >
+          the default block gas meter is now disabled in v0.54. Review your
+          chain configuration to determine if block gas metering should be
+          explicitly enabled.
+        fatal: false
+
+verification:

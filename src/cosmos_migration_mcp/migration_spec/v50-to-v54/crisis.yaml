@@ -17,6 +17,9 @@ upstream_sources:
   - docs://upgrading/v0.54
   - docs://changelog/v0.54-breaking
 
+depends_on:
+  - core-sdk-migration
+
 detection:
   # The spec applies if any of these import prefixes are found in the repo.
   imports:

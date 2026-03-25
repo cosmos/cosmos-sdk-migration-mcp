@@ -150,10 +150,14 @@ SPEC_ORDER = [
     "nft-contrib-migration",
     "gov-keeper-migration",
     "gov-hooks-proposer-arg",
+    "validator-power-rename",
     "epochs-keeper-pointer",
     "epochs-app-module-pointer",
     "ante-handler-simplification",
     "app-structure-cleanup",
+    "sr25519-removal-warning",        # advisory-only warnings
+    "otel-migration-warning",
+    "block-gas-meter-warning",
 ]
 
 

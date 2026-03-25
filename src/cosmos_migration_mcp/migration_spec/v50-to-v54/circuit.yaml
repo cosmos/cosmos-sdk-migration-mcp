@@ -12,7 +12,6 @@ description: |
   - Rewrites import paths: cosmossdk.io/x/circuit → contrib/x/circuit
   - Emits an end-of-run warning about the contrib move
   - Keeps all keeper wiring, store keys, and module registrations in place
-  - Removes the custom ante.go wrapper file (v54 uses ante.NewAnteHandler directly)
 
   What this spec does NOT do:
   - Remove the CircuitKeeper from your app (it remains wired)
@@ -24,6 +23,9 @@ description: |
 upstream_sources:
   - docs://upgrading/v0.54
   - docs://changelog/v0.54-breaking
+
+depends_on:
+  - core-sdk-migration
 
 detection:
   imports:
